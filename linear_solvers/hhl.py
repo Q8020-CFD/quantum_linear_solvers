@@ -87,12 +87,16 @@ class HHL(LinearSolver):
     def __init__(
         self,
         epsilon: float = 1e-2,
+        expectation=None,
+        quantum_instance=None,
     ) -> None:
         r"""
         Args:
             epsilon: Error tolerance of the approximation to the solution, i.e. if :math:`x` is the
                 exact solution and :math:`\tilde{x}` the one calculated by the algorithm, then
                 :math:`||x - \tilde{x}|| \le epsilon`.
+            expectation: Ignored. Kept for backward compatibility.
+            quantum_instance: Ignored. Kept for backward compatibility.
         """
         super().__init__()
 
