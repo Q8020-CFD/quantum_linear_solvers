@@ -33,9 +33,9 @@ class AbsoluteAverage(LinearSystemObservable):
 
             import numpy as np
             from qiskit import QuantumCircuit
+            from qiskit.quantum_info import Statevector
             from quantum_linear_solvers.linear_solvers.observables.absolute_average import \
             AbsoluteAverage
-            from qiskit.opflow import StateFn
 
             observable = AbsoluteAverage()
             vector = [1.0, -2.1, 3.2, -4.3]
@@ -44,12 +44,12 @@ class AbsoluteAverage(LinearSystemObservable):
             num_qubits = int(np.log2(len(vector)))
 
             qc = QuantumCircuit(num_qubits)
-            qc.isometry(init_state, list(range(num_qubits)), None)
+            qc.initialize(init_state, list(range(num_qubits)))
             qc.append(observable.observable_circuit(num_qubits), list(range(num_qubits)))
 
             # Observable operator
             observable_op = observable.observable(num_qubits)
-            state_vec = (~StateFn(observable_op) @ StateFn(qc)).eval()
+            state_vec = Statevector.from_instruction(qc).expectation_value(observable_op)
 
             # Obtain result
             result = observable.post_processing(state_vec, num_qubits)

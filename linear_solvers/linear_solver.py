@@ -17,11 +17,23 @@ from typing import Union, Optional, List, Callable
 import numpy as np
 
 from qiskit import QuantumCircuit
-from qiskit_algorithms.algorithm_result import AlgorithmResult
 
 from .observables.linear_system_observable import LinearSystemObservable
 
 # pylint: disable=too-few-public-methods
+
+
+class AlgorithmResult:
+    """Minimal local replacement for qiskit_algorithms.AlgorithmResult,
+    which is no longer compatible with Qiskit >= 2.0."""
+
+    def __init__(self) -> None:
+        self._result_fields: dict = {}
+
+    def combine(self, result: "AlgorithmResult") -> None:
+        """Combine results from another AlgorithmResult."""
+        if result is not None:
+            self._result_fields.update(result._result_fields)
 
 
 class LinearSolverResult(AlgorithmResult):

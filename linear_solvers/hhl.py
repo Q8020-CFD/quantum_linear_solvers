@@ -16,13 +16,10 @@ from typing import Optional, Union, List, Callable, Tuple
 import numpy as np
 
 from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
-from qiskit.circuit.library import phase_estimation as pe
+from qiskit.circuit.library import PhaseEstimation
 from qiskit.circuit.library.arithmetic.piecewise_chebyshev import PiecewiseChebyshev
 from qiskit.circuit.library.arithmetic.exact_reciprocal import ExactReciprocal
 from qiskit.quantum_info import Operator, Statevector
-from qiskit.primitives import Estimator
-
-from qiskit.providers import Backend
 
 from .linear_solver import LinearSolver, LinearSolverResult
 from .matrices.numpy_matrix import NumPyMatrix
@@ -90,18 +87,12 @@ class HHL(LinearSolver):
     def __init__(
         self,
         epsilon: float = 1e-2,
-        expectation: Optional[Estimator] = None,
-        quantum_instance: Optional[Backend] = None,
     ) -> None:
         r"""
         Args:
             epsilon: Error tolerance of the approximation to the solution, i.e. if :math:`x` is the
                 exact solution and :math:`\tilde{x}` the one calculated by the algorithm, then
                 :math:`||x - \tilde{x}|| \le epsilon`.
-            expectation: The expectation converter applied to the expectation values before
-                evaluation. If None then PauliExpectation is used.
-            quantum_instance: Quantum Instance or Backend. If None, a Statevector calculation is
-                done.
         """
         super().__init__()
 
@@ -113,36 +104,10 @@ class HHL(LinearSolver):
 
         self._scaling = None  # scaling of the solution
 
-        self._sampler = None
-        self._quantum_instance = quantum_instance
-
-        self._expectation = expectation
-
         # For now the default reciprocal implementation is exact
         self._exact_reciprocal = True
         # Set the default scaling to 1
         self.scaling = 1
-
-    @property
-    def quantum_instance(self) -> Optional[Backend]:
-        """Get the quantum instance.
-
-        Returns:
-            The quantum instance used to run this algorithm.
-        """
-        return self._quantum_instance
-
-    @quantum_instance.setter
-    def quantum_instance(
-        self, quantum_instance: Optional[Backend]
-    ) -> None:
-        """Set quantum instance.
-
-        Args:
-            quantum_instance: The quantum instance used to run this algorithm.
-                If None, a Statevector calculation is done.
-        """
-        self._quantum_instance = quantum_instance
 
     @property
     def scaling(self) -> float:
@@ -153,17 +118,6 @@ class HHL(LinearSolver):
     def scaling(self, scaling: float) -> None:
         """Set the new scaling of the solution vector."""
         self._scaling = scaling
-
-    @property
-    def expectation(self) -> Estimator:
-        """The expectation value algorithm used to construct the expectation measurement from
-        the observable."""
-        return self._expectation
-
-    @expectation.setter
-    def expectation(self, expectation: Estimator) -> None:
-        """Set the expectation value algorithm."""
-        self._expectation = expectation
 
     def _get_delta(self, n_l: int, lambda_min: float, lambda_max: float) -> float:
         """Calculates the scaling factor to represent exactly lambda_min on nl binary digits.
@@ -291,28 +245,6 @@ class HHL(LinearSolver):
             expectations.append(Statevector.from_instruction(circuit).
                 expectation_value(ob))
 
-        # check if an expectation converter is given
-        if self._expectation is not None:
-            expectations = self._expectation.convert(expectations)
-        # if otherwise a backend was specified, try to set the best expectation value
-        elif self._sampler is not None:
-            if is_list:
-                op = expectations[0]
-            else:
-                op = expectations
-
-            # For statevector simulation
-            estimator = Estimator()
-            # Run expectation calculation
-            job = estimator.run([circuit], [observable])
-            result = job.result()
-            self._expectation = result.values[0]
-
-        if self._sampler is not None:
-            expectations = self._sampler.convert(expectations)
-
-        # evaluate
-        # Instead of expectations.eval()
         expectation_results = expectations if is_list else expectations[0]
 
         # apply post_processing
@@ -487,7 +419,7 @@ class HHL(LinearSolver):
         # State preparation
         qc.append(vector_circuit, qb[:])
         # QPE
-        pe_circuit = pe.PhaseEstimation(nl, matrix_circuit)
+        pe_circuit = PhaseEstimation(nl, matrix_circuit)
         if na > 0:
             qc.append(
                 pe_circuit, ql[:] + qb[:] + qa[: matrix_circuit.num_ancillas]

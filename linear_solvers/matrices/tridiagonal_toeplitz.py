@@ -17,7 +17,7 @@ import numpy as np
 from scipy.sparse import diags
 
 from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
-from qiskit.circuit.library import MCMT, UGate
+from qiskit.circuit.library import MCMTGate, UGate
 
 from .linear_system_matrix import LinearSystemMatrix
 
@@ -301,7 +301,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
         qc.p(theta, 0)
 
         # pylint: disable=unused-argument
-        def control(num_ctrl_qubits=1, label=None, ctrl_state=None):
+        def control(num_ctrl_qubits=1, label=None, ctrl_state=None, **kwargs):
             qc_control = QuantumCircuit(self.num_state_qubits + 1, name="main_diag")
             qc_control.p(theta, 0)
             return qc_control
@@ -353,9 +353,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             # Multicontrolled rotation
             if len(q_controls) > 1:
                 ugate = UGate(-2 * theta, 3 * np.pi / 2, np.pi / 2)
-                mcmt_gate = MCMT(ugate, len(q_controls), 1)
-                # Set up the synthesis plugin to use V-chain
-                mcmt_gate.synthesis_method = "v-chain"
+                mcmt_gate = MCMTGate(ugate, len(q_controls), 1)
                 qc.append(
                     mcmt_gate,
                     q_controls[:] + [qr[i]],
@@ -371,7 +369,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             qc.cx(qr[i], qr[i + 1])
 
         # pylint: disable=unused-argument
-        def control(num_ctrl_qubits=1, label=None, ctrl_state=None):
+        def control(num_ctrl_qubits=1, label=None, ctrl_state=None, **kwargs):
             qr_state = QuantumRegister(self.num_state_qubits + 1)
             if self.num_state_qubits > 1:
                 qr_ancilla = AncillaRegister(max(1, self.num_state_qubits - 1))
@@ -400,10 +398,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
                 # Multicontrolled x rotation
                 if len(q_controls) > 1:
                     ugate = UGate(-2 * theta, 3 * np.pi / 2, np.pi / 2)
-                    # Create the MCMTGate
-                    mcmt_gate = MCMT(ugate, len(q_controls), 1)
-                    # Set up the synthesis plugin to use V-chain
-                    mcmt_gate.synthesis_method = "v-chain"
+                    mcmt_gate = MCMTGate(ugate, len(q_controls), 1)
                     qc_control.append(
                         mcmt_gate,
                         q_controls[:] + [qr[i]],
@@ -448,7 +443,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
         qc_raw = QuantumCircuit(self.num_state_qubits)
 
         # pylint: disable=unused-argument
-        def control(num_ctrl_qubits=1, label=None, ctrl_state=None):
+        def control(num_ctrl_qubits=1, label=None, ctrl_state=None, **kwargs):
             qr_state = QuantumRegister(self.num_state_qubits + 1, "state")
             if self.num_state_qubits > 1:
                 qr_ancilla = AncillaRegister(max(1, self.num_state_qubits - 1))
