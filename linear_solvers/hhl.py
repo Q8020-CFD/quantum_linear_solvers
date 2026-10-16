@@ -16,9 +16,11 @@ from typing import Optional, Union, List, Callable, Tuple
 import numpy as np
 
 from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
-from qiskit.circuit.library import phase_estimation
-from qiskit.circuit.library.arithmetic.piecewise_chebyshev import PiecewiseChebyshev
-from qiskit.circuit.library.arithmetic.exact_reciprocal import ExactReciprocal
+from qiskit.circuit.library import (
+    ExactReciprocalGate,
+    PiecewiseChebyshevGate,
+    phase_estimation,
+)
 from qiskit.quantum_info import Operator, Statevector
 
 from .linear_solver import LinearSolver, LinearSolverResult
@@ -89,6 +91,7 @@ class HHL(LinearSolver):
         epsilon: float = 1e-2,
         expectation=None,
         quantum_instance=None,
+        exact_reciprocal: bool = True,
     ) -> None:
         r"""
         Args:
@@ -97,6 +100,10 @@ class HHL(LinearSolver):
                 :math:`||x - \tilde{x}|| \le epsilon`.
             expectation: Ignored. Kept for backward compatibility.
             quantum_instance: Ignored. Kept for backward compatibility.
+            exact_reciprocal: If True (default) the conditioned rotation uses
+                ``ExactReciprocalGate``; if False it uses the piecewise Chebyshev
+                approximation (``PiecewiseChebyshevGate``), see
+                :meth:`_chebyshev_reciprocal`.
         """
         super().__init__()
 
@@ -108,8 +115,8 @@ class HHL(LinearSolver):
 
         self._scaling = None  # scaling of the solution
 
-        # For now the default reciprocal implementation is exact
-        self._exact_reciprocal = True
+        # Reciprocal implementation; the default is exact
+        self._exact_reciprocal = exact_reciprocal
         # Set the default scaling to 1
         self.scaling = 1
 
@@ -285,6 +292,66 @@ class HHL(LinearSolver):
         """
         return phase_estimation(num_clock_qubits, unitary, name="QPE")
 
+    def _chebyshev_reciprocal(
+        self, nl: int, constant: float, kappa: float, nb: int
+    ) -> PiecewiseChebyshevGate:
+        """Piecewise Chebyshev approximation of the conditioned rotation.
+
+        Approximates ``arcsin(constant / x)`` on the clock-register value ``x`` in
+        ``[a, 2^nl - 1]`` with ``a = round((2^nl)^(2/3))``, degree and breakpoints
+        as in [2]. Outside that range the rotation saturates at ``arcsin(1)``,
+        which is what the former ``PiecewiseChebyshev`` circuit did through its
+        identity polynomials on the leading and trailing intervals; the gate fits
+        the function on every interval, so the saturation goes into ``f(x)``.
+
+        Args:
+            nl: Number of clock (eigenvalue) qubits.
+            constant: The scaling ``delta`` of the reciprocal.
+            kappa: Condition number bound used for the polynomial degree.
+            nb: Number of state qubits (caps the degree).
+
+        Returns:
+            The gate on ``nl`` state qubits, one target and, with more than one
+            interval, one compare qubit (``gate.num_qubits - nl - 1`` of them).
+        """
+        num_values = 2**nl
+        a = int(round(num_values ** (2 / 3)))
+
+        # Calculate the degree of the polynomial and the number of intervals
+        r = 2 * constant / a + np.sqrt(np.abs(1 - (2 * constant / a) ** 2))
+        degree = min(
+            nb,
+            int(
+                np.log(
+                    1
+                    + (
+                        16.23
+                        * np.sqrt(np.log(r) ** 2 + (np.pi / 2) ** 2)
+                        * kappa
+                        * (2 * kappa - self._epsilon_r)
+                    )
+                    / self._epsilon_r
+                )
+            ),
+        )
+        num_intervals = int(np.ceil(np.log((num_values - 1) / a) / np.log(5)))
+
+        # Calculate breakpoints
+        breakpoints = []
+        for i in range(0, num_intervals):
+            breakpoints.append(a * (5**i))
+            # Define the right breakpoint of the interval
+            if i == num_intervals - 1:
+                breakpoints.append(num_values - 1)
+
+        def reciprocal_angle(x: np.ndarray) -> np.ndarray:
+            x = np.asarray(x, dtype=float)
+            inside = (x >= a) & (x <= num_values - 1)
+            safe_x = np.where(inside, x, constant)  # outside: arcsin(1)
+            return np.arcsin(constant / safe_x)
+
+        return PiecewiseChebyshevGate(reciprocal_angle, nl, degree, breakpoints)
+
     def construct_circuit(
         self,
         matrix: Union[List, np.ndarray, QuantumCircuit],
@@ -394,48 +461,17 @@ class HHL(LinearSolver):
             print("The solution will be calculated up to a scaling factor.")
 
         if self._exact_reciprocal:
-            reciprocal_circuit = ExactReciprocal(nl, delta, neg_vals=neg_vals)
+            reciprocal_circuit = ExactReciprocalGate(nl, delta, neg_vals=neg_vals)
             # Update number of ancilla qubits
+            num_reciprocal_ancillas = 0
             na = matrix_circuit.num_ancillas
         else:
-            # Calculate breakpoints for the reciprocal approximation
-            num_values = 2**nl
-            constant = delta
-            a = int(round(num_values ** (2 / 3)))
-
-            # Calculate the degree of the polynomial and the number of intervals
-            r = 2 * constant / a + np.sqrt(np.abs(1 - (2 * constant / a) ** 2))
-            degree = min(
-                nb,
-                int(
-                    np.log(
-                        1
-                        + (
-                            16.23
-                            * np.sqrt(np.log(r) ** 2 + (np.pi / 2) ** 2)
-                            * kappa
-                            * (2 * kappa - self._epsilon_r)
-                        )
-                        / self._epsilon_r
-                    )
-                ),
-            )
-            num_intervals = int(np.ceil(np.log((num_values - 1) / a) / np.log(5)))
-
-            # Calculate breakpoints and polynomials
-            breakpoints = []
-            for i in range(0, num_intervals):
-                # Add the breakpoint to the list
-                breakpoints.append(a * (5**i))
-
-                # Define the right breakpoint of the interval
-                if i == num_intervals - 1:
-                    breakpoints.append(num_values - 1)
-
-            reciprocal_circuit = PiecewiseChebyshev(
-                lambda x: np.arcsin(constant / x), degree, breakpoints, nl
-            )
-            na = max(matrix_circuit.num_ancillas, reciprocal_circuit.num_ancillas)
+            reciprocal_circuit = self._chebyshev_reciprocal(nl, delta, kappa, nb)
+            # The gate acts on the nl state qubits, the target, and (with more
+            # than one interval) one compare qubit, which is taken from the
+            # ancilla register.
+            num_reciprocal_ancillas = reciprocal_circuit.num_qubits - nl - 1
+            na = max(matrix_circuit.num_ancillas, num_reciprocal_ancillas)
 
         # Initialise the quantum registers
         qb = QuantumRegister(nb)  # right hand side and solution
@@ -464,8 +500,8 @@ class HHL(LinearSolver):
             qc.append(reciprocal_circuit, ql[::-1] + [qf[0]])
         else:
             qc.append(
-                reciprocal_circuit.to_instruction(),
-                ql[:] + [qf[0]] + qa[: reciprocal_circuit.num_ancillas],
+                reciprocal_circuit,
+                ql[:] + [qf[0]] + (qa[:num_reciprocal_ancillas] if na > 0 else []),
             )
         # QPE inverse
         if na > 0:
