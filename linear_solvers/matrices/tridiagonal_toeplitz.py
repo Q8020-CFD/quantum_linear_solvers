@@ -16,7 +16,12 @@ from typing import Tuple, List
 import numpy as np
 from scipy.sparse import diags
 
-from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
+from qiskit.circuit import (
+    AncillaRegister,
+    QuantumCircuit,
+    QuantumRegister,
+    Register,
+)
 from qiskit.circuit.library import MCMTGate, UGate
 
 from .linear_system_matrix import LinearSystemMatrix
@@ -50,10 +55,12 @@ class TridiagonalToeplitz(LinearSystemMatrix):
 
             # Controlled power (as within QPE)
             num_qubits = matrix.num_state_qubits
-            pow_circ = matrix.power(power).control()
+            pow_circ = matrix.power(power).control(annotated=False)
             circ_qubits = pow_circ.num_qubits
             qc = QuantumCircuit(circ_qubits)
-            qc.append(matrix.power(power).control(), list(range(circ_qubits)))
+            qc.append(
+                matrix.power(power).control(annotated=False), list(range(circ_qubits))
+            )
     """
 
     def __init__(
@@ -95,30 +102,6 @@ class TridiagonalToeplitz(LinearSystemMatrix):
         self.trotter_steps = trotter_steps
 
     @property
-    def num_state_qubits(self) -> int:
-        r"""The number of state qubits representing the state :math:`|x\rangle`.
-
-        Returns:
-            The number of state qubits.
-        """
-        return self._num_state_qubits
-
-    @num_state_qubits.setter
-    def num_state_qubits(self, num_state_qubits: int) -> None:
-        """Set the number of state qubits.
-
-        Note that this may change the underlying quantum register, if the number of state qubits
-        changes.
-
-        Args:
-            num_state_qubits: The new number of qubits.
-        """
-        if num_state_qubits != self._num_state_qubits:
-            self._invalidate()
-            self._num_state_qubits = num_state_qubits
-            self._reset_registers(num_state_qubits)
-
-    @property
     def main_diag(self) -> float:
         """Return the entry in the main diagonal."""
         return self._main_diag
@@ -130,6 +113,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             main_diag: The new entry in the main diagonal.
         """
         self._main_diag = main_diag
+        self._invalidate()
 
     @property
     def off_diag(self) -> float:
@@ -143,19 +127,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             off_diag: The new entry in the main diagonal.
         """
         self._off_diag = off_diag
-
-    @property
-    def tolerance(self) -> float:
-        """Return the error tolerance"""
-        return self._tolerance
-
-    @tolerance.setter
-    def tolerance(self, tolerance: float) -> None:
-        """Set the error tolerance.
-        Args:
-            tolerance: The new error tolerance.
-        """
-        self._tolerance = tolerance
+        self._invalidate()
 
     @property
     def evolution_time(self) -> float:
@@ -171,7 +143,8 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             evolution_time: The new time of the evolution.
         """
         self._evolution_time = evolution_time
-        # Update the number of trotter steps. Max 7 for now, upper bounds too loose.
+        # Update the number of trotter steps (its setter drops a built body).
+        # Max 7 for now, upper bounds too loose.
         self.trotter_steps = int(
             np.ceil(
                 np.sqrt(
@@ -192,6 +165,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             trotter_steps: The new number of trotter steps.
         """
         self._trotter_steps = trotter_steps
+        self._invalidate()
 
     @property
     def matrix(self) -> np.ndarray:
@@ -260,29 +234,12 @@ class TridiagonalToeplitz(LinearSystemMatrix):
 
         return valid
 
-    def _reset_registers(self, num_state_qubits: int) -> None:
-        """Reset the quantum registers.
-
-        Args:
-            num_state_qubits: The number of qubits to represent the matrix.
-        """
-        qr_state = QuantumRegister(num_state_qubits, "state")
-        self.qregs = [qr_state]
-        self._ancillas: List[AncillaRegister] = []
-        self._qubits = qr_state[:]
-
+    def _registers(self, num_state_qubits: int) -> List[Register]:
+        """State register plus ``num_state_qubits - 1`` ancillas (none for 1 qubit)."""
+        regs: List[Register] = [QuantumRegister(num_state_qubits, "state")]
         if num_state_qubits > 1:
-            qr_ancilla = AncillaRegister(max(1, num_state_qubits - 1))
-            self.add_register(qr_ancilla)
-
-    def _build(self) -> None:
-        """If not already built, build the circuit."""
-        if self._is_built:
-            return
-
-        super()._build()
-
-        self.compose(self.power(1), inplace=True)
+            regs.append(AncillaRegister(num_state_qubits - 1))
+        return regs
 
     def _main_diag_circ(self, theta: float = 1) -> QuantumCircuit:
         """Circuit implementing the matrix consisting of entries in the main diagonal.
