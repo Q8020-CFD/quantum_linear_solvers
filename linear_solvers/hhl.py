@@ -16,7 +16,7 @@ from typing import Optional, Union, List, Callable, Tuple
 import numpy as np
 
 from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
-from qiskit.circuit.library import PhaseEstimation
+from qiskit.circuit.library import phase_estimation
 from qiskit.circuit.library.arithmetic.piecewise_chebyshev import PiecewiseChebyshev
 from qiskit.circuit.library.arithmetic.exact_reciprocal import ExactReciprocal
 from qiskit.quantum_info import Operator, Statevector
@@ -256,6 +256,35 @@ class HHL(LinearSolver):
 
         return result, expectation_results
 
+    def qpe_circuit(
+        self, num_clock_qubits: int, unitary: QuantumCircuit
+    ) -> QuantumCircuit:
+        """Build the quantum phase estimation block of the HHL circuit.
+
+        This is the single seam for the phase-estimation step, so that another QPE
+        (e.g. a LuGo circuit) can replace it by overriding this method. The default
+        is :func:`qiskit.circuit.library.phase_estimation`: Hadamards on the clock
+        register, ``unitary.power(2**j).control()`` controlled by clock qubit ``j``,
+        then the inverse QFT with the qubit reversal folded in (the bit order the
+        former ``PhaseEstimation`` class produced).
+
+        Args:
+            num_clock_qubits: Size of the clock (eigenvalue) register, ``nl``, as
+                fixed in :meth:`construct_circuit` from the condition-number and
+                eigenvalue bounds of the matrix.
+            unitary: The Hamiltonian simulation circuit ``exp(i A t)``. It must
+                provide ``power(k)`` returning a circuit with a ``control()`` method;
+                its own ancillas, if any, are part of ``unitary.num_qubits``.
+
+        Returns:
+            A circuit on ``num_clock_qubits + unitary.num_qubits`` qubits: the clock
+            qubits first, then the unitary's qubits in the unitary's own order
+            (state qubits, then its ancillas). :meth:`construct_circuit` appends it
+            before the conditioned rotation and its ``inverse()`` after, so the
+            returned circuit must be invertible with ``QuantumCircuit.inverse()``.
+        """
+        return phase_estimation(num_clock_qubits, unitary, name="QPE")
+
     def construct_circuit(
         self,
         matrix: Union[List, np.ndarray, QuantumCircuit],
@@ -423,7 +452,7 @@ class HHL(LinearSolver):
         # State preparation
         qc.append(vector_circuit, qb[:])
         # QPE
-        pe_circuit = PhaseEstimation(nl, matrix_circuit)
+        pe_circuit = self.qpe_circuit(nl, matrix_circuit)
         if na > 0:
             qc.append(
                 pe_circuit, ql[:] + qb[:] + qa[: matrix_circuit.num_ancillas]
