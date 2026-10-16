@@ -13,12 +13,14 @@
 """Test the quantum linear system solver algorithm."""
 
 import unittest
+import warnings
+
 from scipy.linalg import expm
 import numpy as np
 from ddt import ddt, idata, unpack
 
 from qiskit.circuit import QuantumCircuit
-from qiskit.circuit.library.arithmetic.exact_reciprocal import ExactReciprocal
+from qiskit.circuit.library import ExactReciprocalGate
 from qiskit.quantum_info import Operator, partial_trace, Statevector
 from qiskit.transpiler.passes import RemoveResetInZeroState
 
@@ -59,11 +61,13 @@ class TestMatrices(unittest.TestCase):
         matrix.evolution_time = time
 
         num_qubits = matrix.num_state_qubits
-        pow_circ = matrix.power(power).control()
+        pow_circ = matrix.power(power).control(annotated=False)
         circ_qubits = pow_circ.num_qubits
 
         qc = QuantumCircuit(circ_qubits)
-        qc.append(matrix.power(power).control(), list(range(circ_qubits)))
+        qc.append(
+            matrix.power(power).control(annotated=False), list(range(circ_qubits))
+        )
 
         # extract the parts of the circuit matrix corresponding to TridiagonalToeplitz
         zero_op = (Operator.from_label("I") + Operator.from_label("Z")) / 2
@@ -209,8 +213,8 @@ class TestReciprocal(unittest.TestCase):
     @idata([[2, 0.1, False], [3, 1 / 9, True]])
     @unpack
     def test_exact_reciprocal(self, num_qubits, scaling, neg_vals):
-        """Test the ExactReciprocal class."""
-        reciprocal = ExactReciprocal(num_qubits + neg_vals, scaling, neg_vals)
+        """Test the ExactReciprocalGate class."""
+        reciprocal = ExactReciprocalGate(num_qubits + neg_vals, scaling, neg_vals)
 
         qc = QuantumCircuit(num_qubits + 1 + neg_vals)
         qc.h(list(range(num_qubits)))
@@ -239,6 +243,41 @@ class TestReciprocal(unittest.TestCase):
                     exact.append(scaling * (2**num_qubits) / i)
 
         np.testing.assert_array_almost_equal(state_vec, exact, decimal=2)
+
+    @idata([[4, 0.25, 2.6, 2], [5, 0.125, 6.0, 3]])
+    @unpack
+    def test_chebyshev_reciprocal_matches_legacy(self, nl, constant, kappa, nb):
+        """The PiecewiseChebyshevGate reciprocal reproduces the former
+        PiecewiseChebyshev circuit (saturation outside [a, 2^nl - 1] included):
+        same rotation amplitudes for every clock-register value."""
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                from qiskit.circuit.library.arithmetic.piecewise_chebyshev import (
+                    PiecewiseChebyshev,
+                )
+        except ImportError:  # Qiskit >= 3.0: the legacy class is gone
+            self.skipTest("legacy PiecewiseChebyshev not available")
+
+        gate = HHL()._chebyshev_reciprocal(nl, constant, kappa, nb)
+        user_breakpoints = [b for b in gate.breakpoints if 0 < b < 2**nl]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            legacy = PiecewiseChebyshev(
+                lambda x: np.arcsin(constant / x), gate.degree, user_breakpoints, nl
+            )
+
+        def target_amplitudes(operation):
+            # uniform superposition on the clock qubits, target and ancillas |0>
+            qc = QuantumCircuit(operation.num_qubits)
+            qc.h(range(nl))
+            qc.append(operation, qc.qubits)
+            probs = Statevector(qc).probabilities(list(range(nl + 1)))
+            return np.sqrt(probs.reshape(2, 2**nl)[1] * 2**nl)
+
+        np.testing.assert_allclose(
+            target_amplitudes(gate), target_amplitudes(legacy), atol=1e-10
+        )
 
 
 @ddt
@@ -367,6 +406,54 @@ class TestLinearSolver(unittest.TestCase):
 
         np.testing.assert_almost_equal(approx_result, exact_result, decimal=decimal)
 
+    @idata(
+        [
+            # Clock values 2.0 to 6.7 with a = 6: one eigenvalue is fitted, the
+            # three below a are saturated. Measured 0.9897 (0.9948 unsquared).
+            [
+                TridiagonalToeplitz(2, 1, 1 / 3, trotter_steps=2),
+                [1.0, -2.1, 3.2, -4.3],
+                0.98,
+            ],
+            # Clock values 2.0 to 4.7, all below a = 6: every eigenvalue is
+            # saturated, so the approximation returns ~b (measured 0.5756). This
+            # is the legacy PiecewiseChebyshev behaviour, reproduced exactly (see
+            # TestReciprocal.test_chebyshev_reciprocal_matches_legacy); the row
+            # pins it so a change of the saturation shows up here.
+            [
+                np.array([[4, 1, 0, 0], [1, 4, 1, 0], [0, 1, 4, 1], [0, 0, 1, 4]]),
+                [1.0, 0.0, 0.0, 0.0],
+                0.5,
+            ],
+        ]
+    )
+    @unpack
+    def test_hhl_chebyshev_reciprocal(self, matrix, right_hand_side, min_fidelity):
+        """HHL with the piecewise Chebyshev reciprocal (``exact_reciprocal=False``):
+        the solution read off the flag qubit reaches the documented fidelity with
+        the classical solution. The approximation fits arcsin(delta / x) only for
+        clock values x >= a = round((2^nl)^(2/3)) and saturates below, so its
+        quality depends on where the eigenvalues land; the exact reciprocal gives
+        >= 0.999 on both rows."""
+        if isinstance(matrix, QuantumCircuit):
+            exact_matrix = matrix.matrix
+        else:
+            exact_matrix = np.array(matrix)
+        rhs = np.array(right_hand_side) / np.linalg.norm(right_hand_side)
+        nb = int(np.log2(len(rhs)))
+
+        hhl = HHL(exact_reciprocal=False)
+        self.assertFalse(hhl._exact_reciprocal)
+        solution = hhl.solve(matrix, rhs)
+
+        # Solution amplitudes: flag qubit (last) |1>, all other work qubits |0>
+        state = Statevector(solution.state).data
+        start = len(state) // 2
+        hhl_x = np.real(state[start : start + 2**nb])
+        exact_x = np.linalg.solve(exact_matrix, rhs)
+        overlap = abs(np.vdot(hhl_x, exact_x))
+        fidelity = (overlap / np.linalg.norm(hhl_x) / np.linalg.norm(exact_x)) ** 2
+        self.assertGreaterEqual(fidelity, min_fidelity, f"fidelity {fidelity}")
 
 
 if __name__ == "__main__":
