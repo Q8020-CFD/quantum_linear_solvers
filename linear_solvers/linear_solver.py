@@ -13,7 +13,7 @@
 """An abstract class for linear systems solvers."""
 
 from abc import ABC, abstractmethod
-from typing import Union, Optional, List, Callable
+from typing import Any, Union, Optional, List, Callable
 import numpy as np
 
 from qiskit import QuantumCircuit
@@ -53,6 +53,8 @@ class LinearSolverResult(AlgorithmResult):
         self._circuit_results: Optional[
             Union[complex, List[complex], List[Union[complex, List[complex]]]]
         ] = None
+        # spectral bounds that built the circuit (HHL: hhl.SpectralInfo)
+        self._spectral_info: Optional[Any] = None
 
     @property
     def observable(self) -> Union[float, List[float]]:
@@ -109,6 +111,17 @@ class LinearSolverResult(AlgorithmResult):
         results: Union[complex, List[complex], List[Union[complex, List[complex]]]],
     ):
         self._circuit_results = results
+
+    @property
+    def spectral_info(self) -> Optional[Any]:
+        """Spectral bounds (source and values) that sized the circuit; for
+        HHL an ``hhl.SpectralInfo``, None if the solver records none."""
+        return self._spectral_info
+
+    @spectral_info.setter
+    def spectral_info(self, info: Optional[Any]) -> None:
+        """Set the spectral provenance record."""
+        self._spectral_info = info
 
 
 class LinearSolver(ABC):

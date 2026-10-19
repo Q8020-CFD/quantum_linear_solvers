@@ -47,6 +47,7 @@ Linear Solvers
    LinearSolver
    LinearSolverResult
    HHL
+   SpectralInfo
    NumPyLinearSolver
 
 Matrices
@@ -72,7 +73,7 @@ Observables
 
 """
 
-from .hhl import HHL
+from .hhl import HHL, SpectralInfo
 from .numpy_linear_solver import NumPyLinearSolver
 from .linear_solver import LinearSolver, LinearSolverResult
 from .matrices import LinearSystemMatrix, NumPyMatrix, TridiagonalToeplitz
@@ -80,6 +81,7 @@ from .observables import LinearSystemObservable, AbsoluteAverage, MatrixFunction
 
 __all__ = [
     "HHL",
+    "SpectralInfo",
     "NumPyLinearSolver",
     "LinearSolver",
     "LinearSolverResult",

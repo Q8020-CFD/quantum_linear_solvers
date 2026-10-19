@@ -94,14 +94,19 @@ class NumPyMatrix(LinearSystemMatrix):
         self._invalidate()
 
     def eigs_bounds(self) -> Tuple[float, float]:
-        """Return lower and upper bounds on the eigenvalues of the matrix."""
-        matrix_array = self.matrix
-        lambda_max = max(np.abs(np.linalg.eigvals(matrix_array)))
-        lambda_min = min(np.abs(np.linalg.eigvals(matrix_array)))
-        return lambda_min, lambda_max
+        """Return lower and upper bounds on the eigenvalues of the matrix.
+
+        Full dense eigenvalue computation (``np.linalg.eigvals``), done once;
+        the values are those of two separate calls. HHL skips this when the
+        caller supplies ``eigenvalue_bounds``."""
+        abs_eigs = np.abs(np.linalg.eigvals(self.matrix))
+        return min(abs_eigs), max(abs_eigs)
 
     def condition_bounds(self) -> Tuple[float, float]:
-        """Return lower and upper bounds on the condition number of the matrix."""
+        """Return lower and upper bounds on the condition number of the matrix.
+
+        Full dense SVD (``np.linalg.cond``). HHL skips this when the caller
+        supplies ``condition_bound``."""
         matrix_array = self.matrix
         kappa = np.linalg.cond(matrix_array)
         return kappa, kappa

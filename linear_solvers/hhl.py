@@ -12,7 +12,11 @@
 
 """The HHL algorithm."""
 
+import math
+import time
+from dataclasses import dataclass
 from typing import Optional, Union, List, Callable, Tuple
+
 import numpy as np
 
 from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
@@ -26,6 +30,67 @@ from qiskit.quantum_info import Operator, Statevector
 from .linear_solver import LinearSolver, LinearSolverResult
 from .matrices.numpy_matrix import NumPyMatrix
 from .observables.linear_system_observable import LinearSystemObservable
+
+
+@dataclass(frozen=True)
+class SpectralInfo:
+    """Spectral bounds that sized and scaled one HHL circuit (provenance).
+
+    kappa sets the clock register, ``nl = max(nb + 1, ceil(log2(kappa + 1)))
+    + neg_vals``; lambda_min / lambda_max set the reciprocal constant delta
+    and the evolution time. lambda_min is the value used, after the
+    near-zero safety substitution in :meth:`HHL.construct_circuit`; both
+    are None when the matrix circuit gives no eigenvalue bounds and none
+    were supplied. Each source is 'internal' (the matrix circuit's
+    ``condition_bounds()`` / ``eigs_bounds()``; for a NumPyMatrix a full
+    dense SVD / eigendecomposition), 'supplied' (caller arguments) or
+    'none' (no bounds available: kappa = 1, or no eigenvalue scaling).
+    wall_s is the wall time of the internal bound calls, 0.0 when nothing
+    was computed internally.
+    """
+
+    kappa: float
+    lambda_min: Optional[float]
+    lambda_max: Optional[float]
+    kappa_source: str
+    eigs_source: str
+    wall_s: float
+
+    @property
+    def source(self) -> str:
+        """'supplied' if every bound used came from the caller, 'internal'
+        if none did, 'mixed' otherwise."""
+        used = {self.kappa_source, self.eigs_source} - {"none"}
+        if used == {"supplied"}:
+            return "supplied"
+        if "supplied" in used:
+            return "mixed"
+        return "internal"
+
+
+def _check_condition_bound(kappa: float) -> float:
+    """A supplied condition-number bound: finite and >= 1."""
+    kappa = float(kappa)
+    if not (math.isfinite(kappa) and kappa >= 1.0):
+        raise ValueError(f"condition_bound must be finite and >= 1; got {kappa}")
+    return kappa
+
+
+def _check_eigenvalue_bounds(bounds: Tuple[float, float]) -> Tuple[float, float]:
+    """Supplied (lambda_min, lambda_max) of |eigenvalues|: finite,
+    0 <= lambda_min <= lambda_max, lambda_max > 0."""
+    lambda_min, lambda_max = (float(v) for v in bounds)
+    if not (
+        math.isfinite(lambda_min)
+        and math.isfinite(lambda_max)
+        and 0.0 <= lambda_min <= lambda_max
+        and lambda_max > 0.0
+    ):
+        raise ValueError(
+            "eigenvalue_bounds must be finite with 0 <= lambda_min <= "
+            f"lambda_max and lambda_max > 0; got ({lambda_min}, {lambda_max})"
+        )
+    return lambda_min, lambda_max
 
 
 class HHL(LinearSolver):
@@ -119,6 +184,8 @@ class HHL(LinearSolver):
         self._exact_reciprocal = exact_reciprocal
         # Set the default scaling to 1
         self.scaling = 1
+        # SpectralInfo of the last circuit built by construct_circuit
+        self.spectral_info: Optional[SpectralInfo] = None
 
     @property
     def scaling(self) -> float:
@@ -357,6 +424,8 @@ class HHL(LinearSolver):
         matrix: Union[List, np.ndarray, QuantumCircuit],
         vector: Union[List, np.ndarray, QuantumCircuit],
         neg_vals: Optional[bool] = True,
+        condition_bound: Optional[float] = None,
+        eigenvalue_bounds: Optional[Tuple[float, float]] = None,
     ) -> QuantumCircuit:
         """Construct the HHL circuit.
 
@@ -365,6 +434,19 @@ class HHL(LinearSolver):
             vector: The vector specifying the right hand side of the equation in Ax=b.
             neg_vals: States whether the matrix has negative eigenvalues. If False the
             computation becomes cheaper.
+            condition_bound: Optional upper bound on the condition number of the
+                matrix actually encoded. When given, the matrix circuit's
+                ``condition_bounds()`` (a full SVD for a NumPyMatrix) is not
+                called and this value sizes the clock register.
+            eigenvalue_bounds: Optional ``(lambda_min, lambda_max)`` bounds on the
+                absolute eigenvalues of the matrix actually encoded. When given,
+                ``eigs_bounds()`` (a full eigendecomposition for a NumPyMatrix)
+                is not called and these values set delta and the evolution time.
+
+        With neither given the circuit is the one built from the internal
+        bounds, as before. Supplying exactly the internal values gives the
+        identical circuit. The bounds used and their source are stored in
+        :attr:`spectral_info` (a :class:`SpectralInfo`).
 
         Returns:
             The HHL circuit.
@@ -372,7 +454,15 @@ class HHL(LinearSolver):
         Raises:
             ValueError: If the input is not in the correct format.
             ValueError: If the type of the input matrix is not supported.
+            ValueError: If a supplied bound is invalid.
         """
+        # validate supplied bounds before any circuit work
+        if condition_bound is not None:
+            condition_bound = _check_condition_bound(condition_bound)
+        if eigenvalue_bounds is not None:
+            eigenvalue_bounds = _check_eigenvalue_bounds(eigenvalue_bounds)
+        t_internal = 0.0
+
         # State preparation circuit - default is qiskit
         if isinstance(vector, QuantumCircuit):
             nb = vector.num_qubits
@@ -419,25 +509,38 @@ class HHL(LinearSolver):
         if hasattr(matrix_circuit, "tolerance"):
             matrix_circuit.tolerance = self._epsilon_a
 
-        # check if the matrix can calculate the condition number and store the upper bound
-        if (
-            hasattr(matrix_circuit, "condition_bounds")
-            and matrix_circuit.condition_bounds() is not None
-        ):
-            kappa = matrix_circuit.condition_bounds()[1]
+        # check if the matrix can calculate the condition number and store the
+        # upper bound (called once; a supplied bound skips the call)
+        cond_bounds = None
+        if condition_bound is not None:
+            kappa, kappa_source = condition_bound, "supplied"
         else:
-            kappa = 1
+            if hasattr(matrix_circuit, "condition_bounds"):
+                t_0 = time.perf_counter()
+                cond_bounds = matrix_circuit.condition_bounds()
+                t_internal += time.perf_counter() - t_0
+            if cond_bounds is not None:
+                kappa, kappa_source = cond_bounds[1], "internal"
+            else:
+                kappa, kappa_source = 1, "none"
         # Update the number of qubits required to represent the eigenvalues
         # The +neg_vals is to register negative eigenvalues because
         # e^{-2 \pi i \lambda} = e^{2 \pi i (1 - \lambda)}
         nl = max(nb + 1, int(np.ceil(np.log2(kappa + 1)))) + neg_vals
 
-        # check if the matrix can calculate bounds for the eigenvalues
-        if (
-            hasattr(matrix_circuit, "eigs_bounds")
-            and matrix_circuit.eigs_bounds() is not None
-        ):
-            lambda_min, lambda_max = matrix_circuit.eigs_bounds()
+        # check if the matrix can calculate bounds for the eigenvalues (called
+        # once; supplied bounds skip the call)
+        eig_bounds = None
+        if eigenvalue_bounds is not None:
+            eig_bounds, eigs_source = eigenvalue_bounds, "supplied"
+        elif hasattr(matrix_circuit, "eigs_bounds"):
+            t_0 = time.perf_counter()
+            eig_bounds = matrix_circuit.eigs_bounds()
+            t_internal += time.perf_counter() - t_0
+            eigs_source = "internal"
+        lambda_min = lambda_max = None
+        if eig_bounds is not None:
+            lambda_min, lambda_max = eig_bounds
 
             # Add safety check for lambda_min close to or equal to zero
             if abs(lambda_min) < 1e-10:
@@ -457,8 +560,17 @@ class HHL(LinearSolver):
             # Update the scaling of the solution
             self.scaling = lambda_min
         else:
+            eigs_source = "none"
             delta = 1 / (2**nl)
             print("The solution will be calculated up to a scaling factor.")
+        self.spectral_info = SpectralInfo(
+            kappa=float(kappa),
+            lambda_min=None if lambda_min is None else float(lambda_min),
+            lambda_max=None if lambda_max is None else float(lambda_max),
+            kappa_source=kappa_source,
+            eigs_source=eigs_source,
+            wall_s=t_internal,
+        )
 
         if self._exact_reciprocal:
             reciprocal_circuit = ExactReciprocalGate(nl, delta, neg_vals=neg_vals)
@@ -529,6 +641,8 @@ class HHL(LinearSolver):
         post_processing: Optional[
             Callable[[Union[float, List[float]], int, float], float]
         ] = None,
+        condition_bound: Optional[float] = None,
+        eigenvalue_bounds: Optional[Tuple[float, float]] = None,
     ) -> LinearSolverResult:
         """Tries to solve the given linear system of equations.
 
@@ -541,6 +655,10 @@ class HHL(LinearSolver):
                 information. Default is `None`.
             post_processing: Optional function to compute the value of the observable.
                 Default is the raw value of measuring the observable.
+            condition_bound: Optional condition-number bound of the encoded
+                matrix, passed to :meth:`construct_circuit`.
+            eigenvalue_bounds: Optional ``(lambda_min, lambda_max)`` of the
+                encoded matrix, passed to :meth:`construct_circuit`.
 
         Raises:
             ValueError: If an invalid combination of observable, observable_circuit and
@@ -558,7 +676,13 @@ class HHL(LinearSolver):
                 )
 
         solution = LinearSolverResult()
-        solution.state = self.construct_circuit(matrix, vector)
+        solution.state = self.construct_circuit(
+            matrix,
+            vector,
+            condition_bound=condition_bound,
+            eigenvalue_bounds=eigenvalue_bounds,
+        )
+        solution.spectral_info = self.spectral_info
         solution.euclidean_norm = self._calculate_norm(solution.state)
 
         if isinstance(observable, List):

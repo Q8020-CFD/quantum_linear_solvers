@@ -14,6 +14,7 @@
 
 import unittest
 import warnings
+from unittest import mock
 
 from scipy.linalg import expm
 import numpy as np
@@ -25,7 +26,7 @@ from qiskit.quantum_info import Operator, partial_trace, Statevector
 from qiskit.transpiler.passes import RemoveResetInZeroState
 
 
-from linear_solvers.hhl import HHL
+from linear_solvers.hhl import HHL, SpectralInfo
 from linear_solvers.matrices.tridiagonal_toeplitz import TridiagonalToeplitz
 from linear_solvers.matrices.numpy_matrix import NumPyMatrix
 from linear_solvers.observables.absolute_average import AbsoluteAverage
@@ -454,6 +455,175 @@ class TestLinearSolver(unittest.TestCase):
         overlap = abs(np.vdot(hhl_x, exact_x))
         fidelity = (overlap / np.linalg.norm(hhl_x) / np.linalg.norm(exact_x)) ** 2
         self.assertGreaterEqual(fidelity, min_fidelity, f"fidelity {fidelity}")
+
+
+def _doubled(a_mat):
+    """Hermitian doubling [[0, A], [A^H, 0]] (the fvm encoding of a
+    non-Hermitian system); its |eigenvalues| are the singular values of A."""
+    n = a_mat.shape[0]
+    zero = np.zeros((n, n))
+    return np.block([[zero, a_mat], [a_mat.conj().T, zero]])
+
+
+# Hermitian test matrices: 2 x 2, two 4 x 4 (one with negative eigenvalues)
+# and a synthetic 8 x 8 doubled from a fixed non-symmetric 4 x 4.
+SPECTRUM_MATRICES = [
+    np.array([[3.0, 1.0], [1.0, 3.0]]),
+    np.array([[4, 1, 0, 0], [1, 4, 1, 0], [0, 1, 4, 1], [0, 0, 1, 4]], float),
+    np.array([[0, 0, 1.585, 0], [0, 0, -0.585, 1], [1.585, -0.585, 0, 0],
+              [0, 1, 0, 0]]),
+    _doubled(np.array([[2.0, -1.0, 0.3, 0.0], [0.5, 3.0, -1.0, 0.2],
+                       [0.0, 0.7, 1.5, -0.4], [0.1, 0.0, 0.9, 2.5]])),
+]
+
+
+def _rhs(n):
+    vec = np.arange(1.0, n + 1.0)
+    return vec / np.linalg.norm(vec)
+
+
+def _internal_bounds(matrix):
+    """The values construct_circuit computes itself for a NumPyMatrix."""
+    numpy_matrix = NumPyMatrix(matrix)
+    return numpy_matrix.condition_bounds()[1], numpy_matrix.eigs_bounds()
+
+
+def _forbid_internal(cls=NumPyMatrix):
+    """Patch condition_bounds / eigs_bounds of cls to raise if called."""
+    err = AssertionError("internal spectral bound computed")
+    return (mock.patch.object(cls, "condition_bounds", side_effect=err),
+            mock.patch.object(cls, "eigs_bounds", side_effect=err))
+
+
+class TestSuppliedSpectrum(unittest.TestCase):
+    """construct_circuit / solve with caller-supplied condition-number and
+    eigenvalue bounds: the internal full SVD / eigendecomposition is not
+    run, the circuit equals the internal one when the supplied values equal
+    the internal ones, and spectral_info records source and values."""
+
+    def assert_same_circuit(self, qc_a, qc_b):
+        self.assertEqual([r.size for r in qc_a.qregs],
+                         [r.size for r in qc_b.qregs])
+        self.assertEqual(len(qc_a.data), len(qc_b.data))
+        np.testing.assert_array_equal(Statevector(qc_a).data,
+                                      Statevector(qc_b).data)
+
+    def test_internal_default_records_internal(self):
+        for matrix in SPECTRUM_MATRICES:
+            with self.subTest(n=matrix.shape[0]):
+                hhl = HHL()
+                self.assertIsNone(hhl.spectral_info)
+                hhl.construct_circuit(matrix, _rhs(matrix.shape[0]))
+                info = hhl.spectral_info
+                self.assertIsInstance(info, SpectralInfo)
+                self.assertEqual(info.source, "internal")
+                self.assertEqual(info.kappa_source, "internal")
+                self.assertEqual(info.eigs_source, "internal")
+                self.assertEqual(info.kappa, np.linalg.cond(matrix))
+                abs_eigs = np.abs(np.linalg.eigvals(matrix))
+                self.assertEqual(info.lambda_min, min(abs_eigs))
+                self.assertEqual(info.lambda_max, max(abs_eigs))
+                self.assertGreater(info.wall_s, 0.0)
+
+    def test_supplied_skips_internal_calls(self):
+        for matrix in SPECTRUM_MATRICES:
+            kappa, (lam_min, lam_max) = _internal_bounds(matrix)
+            hhl = HHL()
+            no_cond, no_eigs = _forbid_internal()
+            with self.subTest(n=matrix.shape[0]), no_cond, no_eigs:
+                qc = hhl.construct_circuit(matrix, _rhs(matrix.shape[0]),
+                                           condition_bound=kappa,
+                                           eigenvalue_bounds=(lam_min,
+                                                              lam_max))
+                info = hhl.spectral_info
+                self.assertEqual(info.source, "supplied")
+                self.assertEqual((info.kappa, info.lambda_min,
+                                  info.lambda_max), (kappa, lam_min, lam_max))
+                self.assertEqual(info.wall_s, 0.0)
+                self.assertGreater(qc.num_qubits, 0)
+
+    def test_supplied_toeplitz_skips_internal_calls(self):
+        matrix = TridiagonalToeplitz(2, 1, 1 / 3, trotter_steps=2)
+        kappa = matrix.condition_bounds()[1]
+        bounds = matrix.eigs_bounds()
+        hhl = HHL()
+        no_cond, no_eigs = _forbid_internal(TridiagonalToeplitz)
+        with no_cond, no_eigs:
+            hhl.construct_circuit(matrix, _rhs(4), condition_bound=kappa,
+                                  eigenvalue_bounds=bounds)
+        self.assertEqual(hhl.spectral_info.source, "supplied")
+
+    def test_supplied_internal_values_give_identical_circuit(self):
+        for matrix in SPECTRUM_MATRICES:
+            with self.subTest(n=matrix.shape[0]):
+                rhs = _rhs(matrix.shape[0])
+                kappa, bounds = _internal_bounds(matrix)
+                hhl_int, hhl_sup = HHL(), HHL()
+                qc_int = hhl_int.construct_circuit(matrix, rhs)
+                qc_sup = hhl_sup.construct_circuit(
+                    matrix, rhs, condition_bound=kappa,
+                    eigenvalue_bounds=bounds)
+                self.assert_same_circuit(qc_int, qc_sup)
+                self.assertEqual(hhl_int.scaling, hhl_sup.scaling)
+                info_i, info_s = hhl_int.spectral_info, hhl_sup.spectral_info
+                self.assertEqual((info_i.kappa, info_i.lambda_min,
+                                  info_i.lambda_max),
+                                 (info_s.kappa, info_s.lambda_min,
+                                  info_s.lambda_max))
+
+    def test_supplied_kappa_sizes_clock_register(self):
+        # nl = max(nb + 1, ceil(log2(kappa + 1))) + 1 with nb = 1
+        matrix = SPECTRUM_MATRICES[0]
+        for kappa, n_clock in ((1.0, 3), (2.0, 3), (7.0, 4), (100.0, 8)):
+            with self.subTest(kappa=kappa):
+                hhl = HHL()
+                no_cond, _ = _forbid_internal()
+                with no_cond:
+                    qc = hhl.construct_circuit(matrix, _rhs(2),
+                                               condition_bound=kappa)
+                self.assertEqual(qc.qregs[1].size, n_clock)
+                info = hhl.spectral_info
+                self.assertEqual(info.kappa_source, "supplied")
+                self.assertEqual(info.eigs_source, "internal")
+                self.assertEqual(info.source, "mixed")
+
+    def test_eigenvalue_bounds_only(self):
+        matrix = SPECTRUM_MATRICES[1]
+        hhl = HHL()
+        _, no_eigs = _forbid_internal()
+        with no_eigs:
+            hhl.construct_circuit(matrix, _rhs(4),
+                                  eigenvalue_bounds=(1.0, 6.0))
+        info = hhl.spectral_info
+        self.assertEqual((info.kappa_source, info.eigs_source),
+                         ("internal", "supplied"))
+        self.assertEqual((info.lambda_min, info.lambda_max), (1.0, 6.0))
+        self.assertEqual(hhl.scaling, 1.0)
+
+    def test_invalid_supplied_bounds_rejected(self):
+        matrix = SPECTRUM_MATRICES[0]
+        for kappa in (0.5, 0.0, -2.0, np.nan, np.inf):
+            with self.subTest(kappa=kappa), self.assertRaises(ValueError):
+                HHL().construct_circuit(matrix, _rhs(2), condition_bound=kappa)
+        for bounds in ((-1.0, 1.0), (2.0, 1.0), (0.0, 0.0), (1.0, np.inf),
+                       (np.nan, 1.0)):
+            with self.subTest(bounds=bounds), self.assertRaises(ValueError):
+                HHL().construct_circuit(matrix, _rhs(2),
+                                        eigenvalue_bounds=bounds)
+
+    def test_solve_passes_supplied_bounds(self):
+        matrix = SPECTRUM_MATRICES[1]
+        rhs = _rhs(4)
+        kappa, bounds = _internal_bounds(matrix)
+        ref = HHL().solve(matrix, rhs)
+        self.assertEqual(ref.spectral_info.source, "internal")
+        no_cond, no_eigs = _forbid_internal()
+        with no_cond, no_eigs:
+            sup = HHL().solve(matrix, rhs, condition_bound=kappa,
+                              eigenvalue_bounds=bounds)
+        self.assertEqual(sup.spectral_info.source, "supplied")
+        self.assertEqual(sup.euclidean_norm, ref.euclidean_norm)
+        self.assert_same_circuit(ref.state, sup.state)
 
 
 if __name__ == "__main__":
