@@ -34,19 +34,17 @@ from .observables.linear_system_observable import LinearSystemObservable
 
 @dataclass(frozen=True)
 class SpectralInfo:
-    """Spectral bounds that sized and scaled one HHL circuit (provenance).
+    """Spectral bounds used to build one HHL circuit.
 
-    kappa sets the clock register, ``nl = max(nb + 1, ceil(log2(kappa + 1)))
-    + neg_vals``; lambda_min / lambda_max set the reciprocal constant delta
-    and the evolution time. lambda_min is the value used, after the
-    near-zero safety substitution in :meth:`HHL.construct_circuit`; both
-    are None when the matrix circuit gives no eigenvalue bounds and none
-    were supplied. Each source is 'internal' (the matrix circuit's
-    ``condition_bounds()`` / ``eigs_bounds()``; for a NumPyMatrix a full
-    dense SVD / eigendecomposition), 'supplied' (caller arguments) or
-    'none' (no bounds available: kappa = 1, or no eigenvalue scaling).
-    wall_s is the wall time of the internal bound calls, 0.0 when nothing
-    was computed internally.
+    Attributes:
+        kappa: Condition-number bound; sizes the clock register.
+        lambda_min: Smallest absolute eigenvalue used (after the near-zero
+            substitution), or None if no eigenvalue bounds were available.
+        lambda_max: Largest absolute eigenvalue used, or None.
+        kappa_source: 'internal' (the matrix's ``condition_bounds()``),
+            'supplied' or 'none' (kappa = 1).
+        eigs_source: 'internal' (``eigs_bounds()``), 'supplied' or 'none'.
+        wall_s: Wall time in seconds of the internal bound calls.
     """
 
     kappa: float
@@ -165,10 +163,8 @@ class HHL(LinearSolver):
                 :math:`||x - \tilde{x}|| \le epsilon`.
             expectation: Ignored. Kept for backward compatibility.
             quantum_instance: Ignored. Kept for backward compatibility.
-            exact_reciprocal: If True (default) the conditioned rotation uses
-                ``ExactReciprocalGate``; if False it uses the piecewise Chebyshev
-                approximation (``PiecewiseChebyshevGate``), see
-                :meth:`_chebyshev_reciprocal`.
+            exact_reciprocal: Use ``ExactReciprocalGate`` for the conditioned
+                rotation; if False, the piecewise Chebyshev approximation.
         """
         super().__init__()
 
@@ -335,27 +331,19 @@ class HHL(LinearSolver):
     ) -> QuantumCircuit:
         """Build the quantum phase estimation block of the HHL circuit.
 
-        This is the single seam for the phase-estimation step, so that another QPE
-        (e.g. a LuGo circuit) can replace it by overriding this method. The default
-        is :func:`qiskit.circuit.library.phase_estimation`: Hadamards on the clock
-        register, ``unitary.power(2**j).control()`` controlled by clock qubit ``j``,
-        then the inverse QFT with the qubit reversal folded in (the bit order the
-        former ``PhaseEstimation`` class produced).
+        Override to substitute another QPE (e.g. LuGo). The default is
+        :func:`qiskit.circuit.library.phase_estimation`, with the same bit order
+        as qiskit's ``PhaseEstimation`` class.
 
         Args:
-            num_clock_qubits: Size of the clock (eigenvalue) register, ``nl``, as
-                fixed in :meth:`construct_circuit` from the condition-number and
-                eigenvalue bounds of the matrix.
-            unitary: The Hamiltonian simulation circuit ``exp(i A t)``. It must
-                provide ``power(k)`` returning a circuit with a ``control()`` method;
-                its own ancillas, if any, are part of ``unitary.num_qubits``.
+            num_clock_qubits: Size of the clock (eigenvalue) register, ``nl``.
+            unitary: The Hamiltonian simulation circuit ``exp(i A t)``; its
+                ``power(k)`` must return a circuit with a ``control()`` method.
 
         Returns:
-            A circuit on ``num_clock_qubits + unitary.num_qubits`` qubits: the clock
-            qubits first, then the unitary's qubits in the unitary's own order
-            (state qubits, then its ancillas). :meth:`construct_circuit` appends it
-            before the conditioned rotation and its ``inverse()`` after, so the
-            returned circuit must be invertible with ``QuantumCircuit.inverse()``.
+            A circuit on the clock qubits, then the unitary's qubits in its own
+            order. It must be invertible with ``QuantumCircuit.inverse()``, as
+            its inverse uncomputes the QPE.
         """
         return phase_estimation(num_clock_qubits, unitary, name="QPE")
 
@@ -364,12 +352,10 @@ class HHL(LinearSolver):
     ) -> PiecewiseChebyshevGate:
         """Piecewise Chebyshev approximation of the conditioned rotation.
 
-        Approximates ``arcsin(constant / x)`` on the clock-register value ``x`` in
-        ``[a, 2^nl - 1]`` with ``a = round((2^nl)^(2/3))``, degree and breakpoints
-        as in [2]. Outside that range the rotation saturates at ``arcsin(1)``,
-        which is what the former ``PiecewiseChebyshev`` circuit did through its
-        identity polynomials on the leading and trailing intervals; the gate fits
-        the function on every interval, so the saturation goes into ``f(x)``.
+        Approximates ``arcsin(constant / x)`` on the clock value ``x`` in
+        ``[a, 2^nl - 1]``, ``a = round((2^nl)^(2/3))``, with degree and breakpoints
+        as in [2]. Outside that range the rotation saturates at ``arcsin(1)``, as
+        in the legacy ``PiecewiseChebyshev`` circuit.
 
         Args:
             nl: Number of clock (eigenvalue) qubits.
@@ -379,7 +365,7 @@ class HHL(LinearSolver):
 
         Returns:
             The gate on ``nl`` state qubits, one target and, with more than one
-            interval, one compare qubit (``gate.num_qubits - nl - 1`` of them).
+            interval, one compare qubit.
         """
         num_values = 2**nl
         a = int(round(num_values ** (2 / 3)))
@@ -434,19 +420,13 @@ class HHL(LinearSolver):
             vector: The vector specifying the right hand side of the equation in Ax=b.
             neg_vals: States whether the matrix has negative eigenvalues. If False the
             computation becomes cheaper.
-            condition_bound: Optional upper bound on the condition number of the
-                matrix actually encoded. When given, the matrix circuit's
-                ``condition_bounds()`` (a full SVD for a NumPyMatrix) is not
-                called and this value sizes the clock register.
-            eigenvalue_bounds: Optional ``(lambda_min, lambda_max)`` bounds on the
-                absolute eigenvalues of the matrix actually encoded. When given,
-                ``eigs_bounds()`` (a full eigendecomposition for a NumPyMatrix)
-                is not called and these values set delta and the evolution time.
+            condition_bound: Optional condition-number bound of the encoded matrix,
+                used in place of its ``condition_bounds()``; sizes the clock register.
+            eigenvalue_bounds: Optional ``(lambda_min, lambda_max)`` of the absolute
+                eigenvalues of the encoded matrix, used in place of its
+                ``eigs_bounds()``; set delta and the evolution time.
 
-        With neither given the circuit is the one built from the internal
-        bounds, as before. Supplying exactly the internal values gives the
-        identical circuit. The bounds used and their source are stored in
-        :attr:`spectral_info` (a :class:`SpectralInfo`).
+        The bounds used and their source are stored in :attr:`spectral_info`.
 
         Returns:
             The HHL circuit.
@@ -509,8 +489,7 @@ class HHL(LinearSolver):
         if hasattr(matrix_circuit, "tolerance"):
             matrix_circuit.tolerance = self._epsilon_a
 
-        # check if the matrix can calculate the condition number and store the
-        # upper bound (called once; a supplied bound skips the call)
+        # check if the matrix can calculate the condition number and store the upper bound
         cond_bounds = None
         if condition_bound is not None:
             kappa, kappa_source = condition_bound, "supplied"
@@ -528,8 +507,7 @@ class HHL(LinearSolver):
         # e^{-2 \pi i \lambda} = e^{2 \pi i (1 - \lambda)}
         nl = max(nb + 1, int(np.ceil(np.log2(kappa + 1)))) + neg_vals
 
-        # check if the matrix can calculate bounds for the eigenvalues (called
-        # once; supplied bounds skip the call)
+        # check if the matrix can calculate bounds for the eigenvalues
         eig_bounds = None
         if eigenvalue_bounds is not None:
             eig_bounds, eigs_source = eigenvalue_bounds, "supplied"
@@ -579,9 +557,7 @@ class HHL(LinearSolver):
             na = matrix_circuit.num_ancillas
         else:
             reciprocal_circuit = self._chebyshev_reciprocal(nl, delta, kappa, nb)
-            # The gate acts on the nl state qubits, the target, and (with more
-            # than one interval) one compare qubit, which is taken from the
-            # ancilla register.
+            # A compare qubit (more than one interval) comes from the ancillas
             num_reciprocal_ancillas = reciprocal_circuit.num_qubits - nl - 1
             na = max(matrix_circuit.num_ancillas, num_reciprocal_ancillas)
 

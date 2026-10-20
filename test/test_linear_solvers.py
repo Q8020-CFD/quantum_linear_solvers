@@ -248,9 +248,7 @@ class TestReciprocal(unittest.TestCase):
     @idata([[4, 0.25, 2.6, 2], [5, 0.125, 6.0, 3]])
     @unpack
     def test_chebyshev_reciprocal_matches_legacy(self, nl, constant, kappa, nb):
-        """The PiecewiseChebyshevGate reciprocal reproduces the former
-        PiecewiseChebyshev circuit (saturation outside [a, 2^nl - 1] included):
-        same rotation amplitudes for every clock-register value."""
+        """The Chebyshev reciprocal gate matches the legacy PiecewiseChebyshev."""
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
@@ -409,18 +407,14 @@ class TestLinearSolver(unittest.TestCase):
 
     @idata(
         [
-            # Clock values 2.0 to 6.7 with a = 6: one eigenvalue is fitted, the
-            # three below a are saturated. Measured 0.9897 (0.9948 unsquared).
+            # Clock values 2.0 to 6.7, a = 6: one eigenvalue fitted, three saturated.
             [
                 TridiagonalToeplitz(2, 1, 1 / 3, trotter_steps=2),
                 [1.0, -2.1, 3.2, -4.3],
                 0.98,
             ],
             # Clock values 2.0 to 4.7, all below a = 6: every eigenvalue is
-            # saturated, so the approximation returns ~b (measured 0.5756). This
-            # is the legacy PiecewiseChebyshev behaviour, reproduced exactly (see
-            # TestReciprocal.test_chebyshev_reciprocal_matches_legacy); the row
-            # pins it so a change of the saturation shows up here.
+            # saturated (legacy behaviour), so the result is ~b.
             [
                 np.array([[4, 1, 0, 0], [1, 4, 1, 0], [0, 1, 4, 1], [0, 0, 1, 4]]),
                 [1.0, 0.0, 0.0, 0.0],
@@ -430,12 +424,7 @@ class TestLinearSolver(unittest.TestCase):
     )
     @unpack
     def test_hhl_chebyshev_reciprocal(self, matrix, right_hand_side, min_fidelity):
-        """HHL with the piecewise Chebyshev reciprocal (``exact_reciprocal=False``):
-        the solution read off the flag qubit reaches the documented fidelity with
-        the classical solution. The approximation fits arcsin(delta / x) only for
-        clock values x >= a = round((2^nl)^(2/3)) and saturates below, so its
-        quality depends on where the eigenvalues land; the exact reciprocal gives
-        >= 0.999 on both rows."""
+        """HHL with the Chebyshev reciprocal reaches min_fidelity."""
         if isinstance(matrix, QuantumCircuit):
             exact_matrix = matrix.matrix
         else:
@@ -458,8 +447,8 @@ class TestLinearSolver(unittest.TestCase):
 
 
 def _doubled(a_mat):
-    """Hermitian doubling [[0, A], [A^H, 0]] (the fvm encoding of a
-    non-Hermitian system); its |eigenvalues| are the singular values of A."""
+    """Hermitian doubling [[0, A], [A^H, 0]]; its |eigenvalues| are the
+    singular values of A."""
     n = a_mat.shape[0]
     zero = np.zeros((n, n))
     return np.block([[zero, a_mat], [a_mat.conj().T, zero]])
@@ -496,10 +485,7 @@ def _forbid_internal(cls=NumPyMatrix):
 
 
 class TestSuppliedSpectrum(unittest.TestCase):
-    """construct_circuit / solve with caller-supplied condition-number and
-    eigenvalue bounds: the internal full SVD / eigendecomposition is not
-    run, the circuit equals the internal one when the supplied values equal
-    the internal ones, and spectral_info records source and values."""
+    """construct_circuit / solve with supplied spectral bounds."""
 
     def assert_same_circuit(self, qc_a, qc_b):
         self.assertEqual([r.size for r in qc_a.qregs],

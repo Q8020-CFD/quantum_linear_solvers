@@ -10,39 +10,25 @@ pip install .
 Or use this fork, ported to Qiskit 2.x (requires Qiskit >=2.6,<3): https://github.com/Q8020-CFD/quantum_linear_solvers
 ```
 
-This fork (Q8020-CFD/quantum_linear_solvers) requires Qiskit >=2.6,<3 and uses
-only APIs that survive Qiskit 3.0: `phase_estimation()`, `ExactReciprocalGate`,
-`PiecewiseChebyshevGate`, and a plain `QuantumCircuit` base for the matrix
-classes (no `PhaseEstimation`, `ExactReciprocal`, `PiecewiseChebyshev`, `QFT`
-or `BlueprintCircuit`). The phase-estimation step is isolated in
-`HHL.qpe_circuit()` so another QPE implementation can be substituted.
+This fork uses only APIs that survive Qiskit 3.0 (`phase_estimation()`,
+`ExactReciprocalGate`, `PiecewiseChebyshevGate` and a plain `QuantumCircuit`
+base for the matrix classes). The QPE step is isolated in `HHL.qpe_circuit()`
+so another QPE can be substituted.
 
 ### Supplied spectral bounds
 
-`HHL.construct_circuit` and `HHL.solve` take two optional keyword arguments
-for the matrix actually encoded (the Hermitian matrix handed to HHL):
+`HHL.construct_circuit` and `HHL.solve` take two optional bounds for the
+encoded (Hermitian) matrix:
 
-- `condition_bound`: a condition-number bound kappa (finite, >= 1). It sizes
-  the clock register, `nl = max(nb + 1, ceil(log2(kappa + 1))) + neg_vals`.
-- `eigenvalue_bounds`: `(lambda_min, lambda_max)` of the absolute
-  eigenvalues (finite, `0 <= lambda_min <= lambda_max`, `lambda_max > 0`).
-  They set the reciprocal constant delta and the evolution time.
+- `condition_bound`: condition-number bound kappa (>= 1); sizes the clock register.
+- `eigenvalue_bounds`: `(lambda_min, lambda_max)` of the absolute eigenvalues;
+  set delta and the evolution time.
 
-When a value is supplied, the matrix circuit's own `condition_bounds()` or
-`eigs_bounds()` is not called. For a `NumPyMatrix` those are a full dense
-SVD (`np.linalg.cond`) and a full eigendecomposition (`np.linalg.eigvals`).
-With neither argument the circuit is the one built before (each internal
-method is now called once, not twice, with the same values). Supplying
-exactly the internal values gives the identical circuit.
-
-After each build, `HHL.spectral_info` (and `LinearSolverResult.spectral_info`
-from `solve`) is a `linear_solvers.SpectralInfo` with the values used
-(`kappa`, `lambda_min` after the near-zero substitution, `lambda_max`),
-their sources (`kappa_source`, `eigs_source`: `internal`, `supplied` or
-`none`), the combined `source` (`internal`, `supplied` or `mixed`) and
-`wall_s`, the wall time of the internal bound calls (0.0 when both are
-supplied). Tests: `test/test_linear_solvers.py`, class
-`TestSuppliedSpectrum`.
+A supplied value replaces the matrix's own `condition_bounds()` /
+`eigs_bounds()` call (for a `NumPyMatrix`, a dense SVD / eigendecomposition).
+Supplying the internal values gives the identical circuit. The values used and
+their source are recorded in `HHL.spectral_info` and
+`LinearSolverResult.spectral_info` (a `SpectralInfo`).
 
 ## Documentation
 This tutorial is based on an older version of this package, which used an older version of Qiskit. The current version of this library requires Qiskit >=2.6,<3, so these examples won't work as-is. But the gist of the approach remains the same, only the syntax changes.

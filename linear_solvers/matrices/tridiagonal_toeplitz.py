@@ -143,8 +143,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             evolution_time: The new time of the evolution.
         """
         self._evolution_time = evolution_time
-        # Update the number of trotter steps (its setter drops a built body).
-        # Max 7 for now, upper bounds too loose.
+        # Update the number of trotter steps. Max 7 for now, upper bounds too loose.
         self.trotter_steps = int(
             np.ceil(
                 np.sqrt(

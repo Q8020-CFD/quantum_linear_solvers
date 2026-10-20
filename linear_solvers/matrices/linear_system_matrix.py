@@ -22,21 +22,11 @@ from qiskit.circuit import QuantumCircuit, Register
 class LinearSystemMatrix(QuantumCircuit, ABC):
     """Base class for linear system matrices.
 
-    A linear system matrix is a :class:`~qiskit.circuit.QuantumCircuit` whose body
-    implements the Hamiltonian evolution ``exp(i A t)`` of the matrix ``A`` it
-    describes, plus the classical hooks the HHL solver uses: ``eigs_bounds`` and
-    ``condition_bounds`` size the clock register and fix the evolution time, and
-    ``power`` supplies the controlled powers inside phase estimation.
-
-    The circuit body is built lazily. It stays empty until first read (``data``,
-    ``decompose``, ``depth``, ``to_gate`` ...) or first mutation (``append``,
-    ``compose``); that first access runs ``_check_configuration`` and composes
-    ``power(1)`` in. Every setter that changes the body (``evolution_time``,
-    ``tolerance`` and the subclass parameters) drops a built body so it is
-    rebuilt on the next read; changing ``num_state_qubits`` also replaces the
-    registers. This is the contract the former ``BlueprintCircuit`` base provided
-    (deprecated in Qiskit 2.1, removed in 3.0), kept here explicitly on a plain
-    ``QuantumCircuit``.
+    A ``QuantumCircuit`` implementing ``exp(i A t)``, plus the hooks HHL uses:
+    ``eigs_bounds``, ``condition_bounds`` and ``power`` for phase estimation.
+    The body (``power(1)``) is built lazily on first read or mutation and
+    dropped by any setter that changes it, as ``BlueprintCircuit`` (removed in
+    Qiskit 3.0) did.
     """
 
     def __init__(
@@ -173,8 +163,7 @@ class LinearSystemMatrix(QuantumCircuit, ABC):
 
     def _invalidate(self) -> None:
         """Drop a built circuit body; it is rebuilt on the next access."""
-        # Nothing to drop before the first build (setters also run before the
-        # QuantumCircuit part of __init__ in the subclasses).
+        # getattr: subclass setters can run before __init__ sets _is_built
         if not getattr(self, "_is_built", False):
             return
         self.clear()
@@ -196,9 +185,8 @@ class LinearSystemMatrix(QuantumCircuit, ABC):
             self._invalidate()
             raise
 
-    # The QuantumCircuit entry points that read or mutate the body build it
-    # first (the former BlueprintCircuit hooks), so a user's own instructions
-    # always follow the power(1) body.
+    # QuantumCircuit entry points that read or mutate the body build it first,
+    # so a user's own instructions always follow the power(1) body.
 
     @property
     def data(self):
@@ -226,9 +214,8 @@ class LinearSystemMatrix(QuantumCircuit, ABC):
     def copy_empty_like(self, name=None, *, vars_mode="alike") -> QuantumCircuit:
         """Empty copy as a plain ``QuantumCircuit`` with the same registers.
 
-        Plain on purpose (as ``BlueprintCircuit`` did): the helpers that rebuild a
-        circuit from an empty copy (``reverse_ops``, ``remove_final_measurements``,
-        ``reverse_bits``, ...) must not re-trigger the lazy build on the copy.
+        Plain so that helpers which rebuild from an empty copy (``reverse_ops``,
+        ``reverse_bits``, ...) do not trigger the lazy build on it.
         """
         cpy = QuantumCircuit(
             *self.qregs, *self.cregs, name=name, global_phase=self.global_phase
@@ -240,8 +227,7 @@ class LinearSystemMatrix(QuantumCircuit, ABC):
         """Built copy of the same class (parameters, registers and body)."""
         self._build()
         cpy = _copy.copy(self)
-        # Fresh empty body on the same registers, then the built body composed
-        # in (the shallow copy would share the instruction list otherwise).
+        # Fresh body on the same registers; a shallow copy shares the data list
         QuantumCircuit.__init__(
             cpy, *self.qregs, *self.cregs, name=self.name if name is None else name
         )
