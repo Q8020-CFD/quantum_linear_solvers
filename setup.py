@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 import os
 
 name = "quantum_linear_solvers"
-version = "0.1.0"    # pinned to Qiskit 2.6.0
+version = "0.1.0"    # requires Qiskit >=2.6,<3
 description = (
     "Quantum linear solvers package"
 )
